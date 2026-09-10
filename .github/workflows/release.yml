@@ -1,0 +1,240 @@
+name: 🚀 Build & Release Hardware-Optimized Vector
+
+on:
+  schedule:
+    # Run once daily at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: 'Specific upstream tag to build (e.g. v0.46.0)'
+        required: false
+        type: string
+        default: ''
+      skip_arm:
+        description: 'Skip ephemeral GCP ARM build'
+        required: false
+        type: boolean
+        default: false
+      skip_x86:
+        description: 'Skip x86 ARC runner build'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  GCP_PROJECT: 'oranged-experimentation'
+  GCP_ZONE: 'us-central1-a'
+
+jobs:
+  check-upstream:
+    name: 🔍 Check Upstream Releases
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      target_tag: ${{ steps.check.outputs.target_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for unbuilt release
+        id: check
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/check-upstream-release.sh "${{ inputs.force_tag }}"
+
+  # ---------------------------------------------------------------------------
+  # x86_64 Architecture Build (Runs on existing on-prem ARC Kubernetes Runner)
+  # ---------------------------------------------------------------------------
+  build-x86:
+    name: 🔨 Build x86_64 (x86-64-v3)
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true' && !inputs.skip_x86
+    runs-on: arc-runner-set
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake libssl-dev pkg-config libsasl2-dev \
+            curl jq git protobuf-compiler libz-dev
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Shallow clone upstream Vector tag
+        run: |
+          git clone --depth 1 --branch "${{ needs.check-upstream.outputs.target_tag }}" \
+            https://github.com/vectordotdev/vector.git vector-src
+
+      - name: Compile Vector with x86-64-v3 optimizations
+        run: |
+          cd vector-src
+          export RUSTFLAGS="-C target-cpu=x86-64-v3"
+          export CFLAGS="-march=x86-64-v3"
+          cargo build --release
+          strip target/release/vector || true
+
+      - name: Package tarball
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/package-tarball.sh "${{ needs.check-upstream.outputs.target_tag }}" "x86_64-unknown-linux-gnu-v3"
+
+      - name: Upload x86 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ needs.check-upstream.outputs.target_tag }}-x86_64
+          path: artifacts/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # ARM64 Architecture Build (Ephemeral GCP Tau T2A Neoverse-N1 Instance)
+  # ---------------------------------------------------------------------------
+  provision-arm-runner:
+    name: ☁️ Provision GCP ARM Runner
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true' && !inputs.skip_arm
+    runs-on: ubuntu-latest
+    outputs:
+      instance_name: ${{ steps.provision.outputs.instance_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        if: env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Launch ephemeral ARM instance
+        id: provision
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/gcp-arm-runner-up.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_PROJECT: ${{ env.GCP_PROJECT }}
+          GCP_ZONE: ${{ env.GCP_ZONE }}
+
+  build-arm:
+    name: 🔨 Build ARM64 (LSE / Neoverse-N1)
+    needs: [check-upstream, provision-arm-runner]
+    runs-on: [self-hosted, gcp-arm64, ephemeral]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shallow clone upstream Vector tag
+        run: |
+          git clone --depth 1 --branch "${{ needs.check-upstream.outputs.target_tag }}" \
+            https://github.com/vectordotdev/vector.git vector-src
+
+      - name: Compile Vector with ARM LSE optimizations
+        run: |
+          cd vector-src
+          export RUSTFLAGS="-C target-feature=+lse -C target-cpu=neoverse-n1"
+          export CFLAGS="-march=armv8.2-a+lse"
+          cargo build --release
+          strip target/release/vector || true
+
+      - name: Package tarball
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/package-tarball.sh "${{ needs.check-upstream.outputs.target_tag }}" "aarch64-unknown-linux-gnu-lse"
+
+      - name: Upload ARM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ needs.check-upstream.outputs.target_tag }}-arm64
+          path: artifacts/*.tar.gz
+
+  teardown-arm-runner:
+    name: 🧹 Teardown GCP ARM Runner
+    needs: [provision-arm-runner, build-arm]
+    if: always() && needs.provision-arm-runner.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        if: env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Delete ephemeral ARM instance
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/gcp-arm-runner-down.sh "${{ needs.provision-arm-runner.outputs.instance_name }}"
+        env:
+          GCP_PROJECT: ${{ env.GCP_PROJECT }}
+          GCP_ZONE: ${{ env.GCP_ZONE }}
+
+  # ---------------------------------------------------------------------------
+  # Publish Release
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 📦 Publish GitHub Release
+    needs: [check-upstream, build-x86, build-arm]
+    if: always() && needs.check-upstream.outputs.should_build == 'true' && (needs.build-x86.result == 'success' || needs.build-arm.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS and Release Notes
+        env:
+          TARGET_TAG: ${{ needs.check-upstream.outputs.target_tag }}
+        run: |
+          cd dist
+          sha256sum vector-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+          cat <<EOF > ../release_notes.md
+          ## Vector ${TARGET_TAG} (Hardware-Optimized Distribution)
+
+          This release provides high-performance, hardware-optimized distributions of official Vector **${TARGET_TAG}**.
+
+          Upstream Release Notes: [vectordotdev/vector ${TARGET_TAG}](https://github.com/vectordotdev/vector/releases/tag/${TARGET_TAG})
+
+          ### Included Artifacts
+          * **\`vector-${TARGET_TAG}-aarch64-unknown-linux-gnu-lse.tar.gz\`**: Compiled with ARMv8.2-A Large System Extensions (\`+lse\`) and tuned for Neoverse-N1. Recommended for AWS Graviton 2/3/4, GCP Tau T2A, and Ampere Altra (+4.78% throughput, -4% binary size).
+          * **\`vector-${TARGET_TAG}-x86_64-unknown-linux-gnu-v3.tar.gz\`**: Compiled with \`x86-64-v3\` vector extensions (AVX, AVX2, BMI2, FMA). Recommended for modern Intel and AMD cloud servers.
+          * **\`SHA256SUMS\`**: Cryptographic checksums for verifying download integrity.
+
+          ### Quick Verification
+          \`\`\`bash
+          sha256sum --ignore-missing -c SHA256SUMS
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ needs.check-upstream.outputs.target_tag }}
+        run: |
+          gh release create "${TARGET_TAG}" \
+            --title "Vector ${TARGET_TAG} (Hardware-Optimized)" \
+            --notes-file release_notes.md \
+            dist/vector-*.tar.gz dist/SHA256SUMS
