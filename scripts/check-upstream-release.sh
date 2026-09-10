@@ -14,15 +14,17 @@ if [[ -n "${FORCE_TAG}" ]]; then
   exit 0
 fi
 
-echo "Checking latest release from https://github.com/${UPSTREAM_REPO}..."
-LATEST_UPSTREAM=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | jq -r .tag_name)
+echo "Querying releases from https://github.com/${UPSTREAM_REPO}..."
+# Filter for published non-draft/non-prerelease tags matching v[0-9]* (ignores vdev-*)
+LATEST_UPSTREAM=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases" | \
+  jq -r '[.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]")))] | .[0].tag_name // empty')
 
-if [[ -z "${LATEST_UPSTREAM}" || "${LATEST_UPSTREAM}" == "null" ]]; then
-  echo "Error: Failed to fetch latest release from ${UPSTREAM_REPO}" >&2
+if [[ -z "${LATEST_UPSTREAM}" ]]; then
+  echo "Error: Failed to find a valid Vector release tag (e.g. v0.x.y) from ${UPSTREAM_REPO}" >&2
   exit 1
 fi
 
-echo "Latest upstream release: ${LATEST_UPSTREAM}"
+echo "Latest official Vector release: ${LATEST_UPSTREAM}"
 echo "Checking if ${LATEST_UPSTREAM} has already been published in ${DOWNSTREAM_REPO}..."
 HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://api.github.com/repos/${DOWNSTREAM_REPO}/releases/tags/${LATEST_UPSTREAM}")
 
