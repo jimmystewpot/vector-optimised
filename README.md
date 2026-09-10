@@ -22,7 +22,7 @@ Upstream Vector distributes generic pre-compiled binaries targeting baseline CPU
 2. **x86_64 (`x86_64-unknown-linux-gnu-v3`)**:
    - Compiled targeting the **`x86-64-v3`** microarchitecture level.
    - Enables AVX, AVX2, BMI1, BMI2, FMA, F16C, and LZCNT vectorization.
-   - Dramatically accelerates JSON parsing (`simd-json`), VRL string manipulation, and compression codecs (`zstd`, `lz4`).
+   - Accelerates UTF-8 validation (`simdutf8`), base64 encoding (`base64-simd`), hashing, VRL string operations, and compression codecs (`zstd`, `lz4`).
    - **Target Hardware**: Modern Intel Xeon (Haswell+) and AMD EPYC (Zen 1+) cloud instances.
 
 ---
