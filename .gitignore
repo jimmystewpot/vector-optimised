@@ -1,0 +1,5 @@
+target/
+artifacts/
+*.tar.gz
+*.log
+.DS_Store
