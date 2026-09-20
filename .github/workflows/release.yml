@@ -1,6 +1,6 @@
 name: 🚀 Build & Release Hardware-Optimized Vector
 
-on:
+'on':
   schedule:
     # Run once daily at 02:00 UTC
     - cron: '0 2 * * *'
@@ -24,13 +24,17 @@ on:
 
 permissions:
   contents: write
+  id-token: write
   actions: write
 
 env:
   GCP_PROJECT: 'oranged-experimentation'
-  GCP_ZONE: 'us-central1-a'
+  GCP_ZONE: 'europe-north1-a'
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Step 1: Upstream Release Check
+  # ---------------------------------------------------------------------------
   check-upstream:
     name: 🔍 Check Upstream Releases
     runs-on: ubuntu-latest
@@ -38,7 +42,7 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
       target_tag: ${{ steps.check.outputs.target_tag }}
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Check for unbuilt release
@@ -48,7 +52,7 @@ jobs:
           ./scripts/check-upstream-release.sh "${{ inputs.force_tag }}"
 
   # ---------------------------------------------------------------------------
-  # x86_64 Architecture Build (Runs on existing on-prem ARC Kubernetes Runner)
+  # Step 2: x86_64 Build (Runs on ARC Kubernetes Runner)
   # ---------------------------------------------------------------------------
   build-x86:
     name: 🔨 Build x86_64 (x86-64-v3)
@@ -56,14 +60,18 @@ jobs:
     if: needs.check-upstream.outputs.should_build == 'true' && !inputs.skip_x86
     runs-on: arc-runner-set
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends \
             build-essential clang cmake libssl-dev pkg-config libsasl2-dev \
-            curl jq git protobuf-compiler libz-dev
+            curl jq git protobuf-compiler libz-dev gcc-14 g++-14 || true
+          if command -v gcc-14 >/dev/null 2>&1; then
+            sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14 || true
+          fi
+          gcc --version
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -73,14 +81,16 @@ jobs:
 
       - name: Shallow clone upstream Vector tag
         run: |
+          rm -rf vector-src
           git clone --depth 1 --branch "${{ needs.check-upstream.outputs.target_tag }}" \
             https://github.com/vectordotdev/vector.git vector-src
 
       - name: Compile Vector with x86-64-v3 optimizations
         run: |
           cd vector-src
-          export RUSTFLAGS="-C target-cpu=x86-64-v3"
-          export CFLAGS="-march=x86-64-v3"
+          export CFLAGS="-O3 -march=x86-64-v3"
+          export CXXFLAGS="-O3 -march=x86-64-v3"
+          export RUSTFLAGS="-C target-cpu=x86-64-v3 -C panic=abort -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,-O3"
           cargo build --release
           strip target/release/vector || true
 
@@ -96,63 +106,116 @@ jobs:
           path: artifacts/*.tar.gz
 
   # ---------------------------------------------------------------------------
-  # ARM64 Architecture Build (Ephemeral GCP Tau T2A Neoverse-N1 Instance)
+  # Step 3: Launch Ephemeral ARM64 Runner (Google Cloud Axion C4A SPOT VM)
   # ---------------------------------------------------------------------------
-  provision-arm-runner:
-    name: ☁️ Provision GCP ARM Runner
+  launch-arm-runner:
+    name: ☁️ Launch GCE Axion C4A Runner
     needs: check-upstream
     if: needs.check-upstream.outputs.should_build == 'true' && !inputs.skip_arm
     runs-on: ubuntu-latest
     outputs:
-      instance_name: ${{ steps.provision.outputs.instance_name }}
+      runner-label: ${{ steps.create-vm.outputs.runner-label }}
+      instance-name: ${{ steps.create-vm.outputs.instance-name }}
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
-        if: env.GCP_SA_KEY != ''
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          service_account: "gha-arm-runner@oranged-experimentation.iam.gserviceaccount.com"
 
-      - name: Launch ephemeral ARM instance
-        id: provision
+      - name: Generate GitHub App Runner Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ARM_RUNNER_APP_ID }}
+          private-key: ${{ secrets.ARM_RUNNER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Provision Spot C4A Instance
+        id: create-vm
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/gcp-arm-runner-up.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GCP_PROJECT: ${{ env.GCP_PROJECT }}
-          GCP_ZONE: ${{ env.GCP_ZONE }}
+          INSTANCE_NAME="gce-arm-${{ github.run_id }}-${{ github.run_attempt }}"
+          RUNNER_LABEL="gce-arm-${{ github.run_id }}"
 
+          REG_TOKEN=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" | jq -r .token)
+
+          if [[ -z "${REG_TOKEN}" || "${REG_TOKEN}" == "null" ]]; then
+            echo "Error: Failed to obtain runner registration token from GitHub API" >&2
+            exit 1
+          fi
+
+          echo "runner-label=${RUNNER_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "instance-name=${INSTANCE_NAME}" >> "$GITHUB_OUTPUT"
+
+          gcloud compute instances create "${INSTANCE_NAME}" \
+            --project="${{ env.GCP_PROJECT }}" \
+            --zone="${{ env.GCP_ZONE }}" \
+            --machine-type="c4a-standard-4" \
+            --provisioning-model=SPOT \
+            --instance-termination-action=DELETE \
+            --max-run-duration=30m \
+            --image-family="ubuntu-minimal-2404-lts-arm64" \
+            --image-project="ubuntu-os-cloud" \
+            --boot-disk-size=50GB \
+            --metadata="github-repo=${{ github.repository }},runner-token=${REG_TOKEN},runner-labels=self-hosted,linux,arm64,${RUNNER_LABEL}" \
+            --metadata-from-file=startup-script=scripts/gce-arm-bootstrap.sh
+
+  # ---------------------------------------------------------------------------
+  # Step 4: ARM64 Build (Runs in Container on Ephemeral C4A Runner)
+  # ---------------------------------------------------------------------------
   build-arm:
-    name: 🔨 Build ARM64 (LSE / Neoverse-N1)
-    needs: [check-upstream, provision-arm-runner]
-    runs-on: [self-hosted, gcp-arm64, ephemeral]
+    name: 🔨 Build ARM64 (Axion Neoverse-V2 / LSE+CRC)
+    needs: [check-upstream, launch-arm-runner]
+    runs-on: [self-hosted, "${{ needs.launch-arm-runner.outputs.runner-label }}"]
     timeout-minutes: 60
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Shallow clone upstream Vector tag
+      - name: Verify Architecture & Engine
         run: |
-          git clone --depth 1 --branch "${{ needs.check-upstream.outputs.target_tag }}" \
-            https://github.com/vectordotdev/vector.git vector-src
+          uname -m
+          lscpu | grep "Model name\|Architecture" || true
+          docker info
 
-      - name: Compile Vector with ARM LSE optimizations
+      - name: Build Vector in Ubuntu 24.04 Container
         run: |
-          cd vector-src
-          export RUSTFLAGS="-C target-feature=+lse -C target-cpu=neoverse-n1"
-          export CFLAGS="-march=armv8.2-a+lse"
-          cargo build --release
-          strip target/release/vector || true
+          docker run --rm \
+            -e TARGET_TAG="${{ needs.check-upstream.outputs.target_tag }}" \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            ubuntu:24.04 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qy && apt-get install -qy --no-install-recommends \
+                build-essential clang cmake libssl-dev pkg-config libsasl2-dev \
+                curl jq git protobuf-compiler libz-dev gcc g++ ca-certificates
 
-      - name: Package tarball
-        run: |
-          chmod +x scripts/*.sh
-          ./scripts/package-tarball.sh "${{ needs.check-upstream.outputs.target_tag }}" "aarch64-unknown-linux-gnu-lse"
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              source "$HOME/.cargo/env"
+
+              rm -rf vector-src
+              git clone --depth 1 --branch "${TARGET_TAG}" \
+                https://github.com/vectordotdev/vector.git vector-src
+
+              cd vector-src
+              export CFLAGS="-O3 -march=armv8.2-a+lse+crc"
+              export CXXFLAGS="-O3 -march=armv8.2-a+lse+crc"
+              export RUSTFLAGS="-C target-feature=+lse,+crc -C panic=abort -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,-O3"
+              cargo build --release
+              strip target/release/vector || true
+              cd /workspace
+
+              chmod +x scripts/*.sh
+              ./scripts/package-tarball.sh "${TARGET_TAG}" "aarch64-unknown-linux-gnu-lse"
+              chown -R "$(stat -c "%u:%g" /workspace)" /workspace/artifacts /workspace/target /workspace/vector-src 2>/dev/null || chmod -R a+rwX /workspace || true
+            '
 
       - name: Upload ARM artifact
         uses: actions/upload-artifact@v4
@@ -160,33 +223,32 @@ jobs:
           name: vector-${{ needs.check-upstream.outputs.target_tag }}-arm64
           path: artifacts/*.tar.gz
 
+  # ---------------------------------------------------------------------------
+  # Step 5: Teardown Ephemeral ARM64 Runner
+  # ---------------------------------------------------------------------------
   teardown-arm-runner:
-    name: 🧹 Teardown GCP ARM Runner
-    needs: [provision-arm-runner, build-arm]
-    if: always() && needs.provision-arm-runner.result == 'success'
+    name: 🧹 Teardown GCE Axion C4A Runner
+    needs: [launch-arm-runner, build-arm]
+    if: always() && needs.launch-arm-runner.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        if: env.GCP_SA_KEY != ''
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          service_account: "gha-arm-runner@oranged-experimentation.iam.gserviceaccount.com"
 
-      - name: Delete ephemeral ARM instance
+      - name: Delete GCE ARM Instance
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/gcp-arm-runner-down.sh "${{ needs.provision-arm-runner.outputs.instance_name }}"
-        env:
-          GCP_PROJECT: ${{ env.GCP_PROJECT }}
-          GCP_ZONE: ${{ env.GCP_ZONE }}
+          if [ -n "${{ needs.launch-arm-runner.outputs.instance-name }}" ]; then
+            gcloud compute instances delete "${{ needs.launch-arm-runner.outputs.instance-name }}" \
+              --project="${{ env.GCP_PROJECT }}" \
+              --zone="${{ env.GCP_ZONE }}" \
+              --quiet || true
+          fi
 
   # ---------------------------------------------------------------------------
-  # Publish Release
+  # Step 6: Publish Release
   # ---------------------------------------------------------------------------
   publish:
     name: 📦 Publish GitHub Release
@@ -194,7 +256,7 @@ jobs:
     if: always() && needs.check-upstream.outputs.should_build == 'true' && (needs.build-x86.result == 'success' || needs.build-arm.result == 'success')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Download all package artifacts
@@ -211,23 +273,28 @@ jobs:
           sha256sum vector-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-          cat <<EOF > ../release_notes.md
-          ## Vector ${TARGET_TAG} (Hardware-Optimized Distribution)
-
-          This release provides high-performance, hardware-optimized distributions of official Vector **${TARGET_TAG}**.
-
-          Upstream Release Notes: [vectordotdev/vector ${TARGET_TAG}](https://github.com/vectordotdev/vector/releases/tag/${TARGET_TAG})
-
-          ### Included Artifacts
-          * **\`vector-${TARGET_TAG}-aarch64-unknown-linux-gnu-lse.tar.gz\`**: Compiled with ARMv8.2-A Large System Extensions (\`+lse\`) and tuned for Neoverse-N1. Recommended for AWS Graviton 2/3/4, GCP Tau T2A, and Ampere Altra (+4.78% throughput, -4% binary size).
-          * **\`vector-${TARGET_TAG}-x86_64-unknown-linux-gnu-v3.tar.gz\`**: Compiled with \`x86-64-v3\` vector extensions (AVX, AVX2, BMI2, FMA). Recommended for modern Intel and AMD cloud servers.
-          * **\`SHA256SUMS\`**: Cryptographic checksums for verifying download integrity.
-
-          ### Quick Verification
-          \`\`\`bash
-          sha256sum --ignore-missing -c SHA256SUMS
-          \`\`\`
-          EOF
+          {
+            echo "## Vector ${TARGET_TAG} (Hardware-Optimized Distribution)"
+            echo ""
+            echo "This release provides high-performance, hardware-optimized distributions of official Vector **${TARGET_TAG}**."
+            echo ""
+            echo "Upstream Release Notes: https://github.com/vectordotdev/vector/releases/tag/${TARGET_TAG}"
+            echo ""
+            echo "### Architecture & Optimization Details"
+            echo "* **ARM64 (\`aarch64-unknown-linux-gnu-lse\`)**:"
+            echo "  - Built natively on Google Cloud Axion C4A (ARM Neoverse-V2) using GCC 14 and Ubuntu 24.04 LTS."
+            echo "  - Compiled with ARMv8.2-A Large System Extensions (\`+lse\`) and CRC32 (\`+crc\`) instructions (\`-march=armv8.2-a+lse+crc\`, \`-C target-feature=+lse,+crc\`)."
+            echo "  - Recommended for Google Cloud Axion (C4A), AWS Graviton 2/3/4, GCP Tau T2A, and Ampere Altra/AmpereOne."
+            echo "* **x86_64 (\`x86_64-unknown-linux-gnu-v3\`)**:"
+            echo "  - Built using GCC 14 and \`x86-64-v3\` vector extensions (\`-march=x86-64-v3\`, \`-C target-cpu=x86-64-v3\`)."
+            echo "  - Enables AVX, AVX2, BMI1, BMI2, FMA, F16C, and LZCNT vectorization."
+            echo "  - Recommended for modern Intel and AMD cloud servers."
+            echo ""
+            echo "### Cryptographic Verification"
+            echo "\`\`\`bash"
+            echo "sha256sum --ignore-missing -c SHA256SUMS"
+            echo "\`\`\`"
+          } > ../release_notes.md
 
       - name: Create GitHub Release
         env:
