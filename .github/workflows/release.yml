@@ -156,7 +156,7 @@ jobs:
           gcloud compute instances create "${INSTANCE_NAME}" \
             --project="${{ env.GCP_PROJECT }}" \
             --zone="${{ env.GCP_ZONE }}" \
-            --machine-type="c4a-standard-4" \
+            --machine-type="c4a-standard-16" \
             --provisioning-model=SPOT \
             --instance-termination-action=DELETE \
             --max-run-duration=30m \
@@ -298,12 +298,19 @@ jobs:
             echo "\`\`\`"
           } > ../release_notes.md
 
-      - name: Create GitHub Release
+      - name: Create or Update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_TAG: ${{ needs.check-upstream.outputs.target_tag }}
         run: |
-          gh release create "${TARGET_TAG}" \
-            --title "Vector ${TARGET_TAG} (Hardware-Optimized)" \
-            --notes-file release_notes.md \
-            dist/vector-*.tar.gz dist/SHA256SUMS
+          if gh release view "${TARGET_TAG}" >/dev/null 2>&1; then
+            echo "Release ${TARGET_TAG} already exists. Updating notes and uploading assets with clobber..."
+            gh release edit "${TARGET_TAG}" --notes-file release_notes.md
+            gh release upload "${TARGET_TAG}" dist/vector-*.tar.gz dist/SHA256SUMS --clobber
+          else
+            echo "Creating new release ${TARGET_TAG}..."
+            gh release create "${TARGET_TAG}" \
+              --title "Vector ${TARGET_TAG} (Hardware-Optimized)" \
+              --notes-file release_notes.md \
+              dist/vector-*.tar.gz dist/SHA256SUMS
+          fi

@@ -104,7 +104,7 @@ This repository is an automated build and release orchestrator:
 1. **Upstream Release Detection**: A scheduled GitHub Actions workflow runs daily at 02:00 UTC to inspect [vectordotdev/vector](https://github.com/vectordotdev/vector) for new official releases.
 2. **Dedicated Runner Compilation**:
    - **x86_64 Builds**: Run locally on a Kubernetes ARC runner scale set (`runs-on: arc-runner-set`) targeting `x86-64-v3`.
-   - **ARM64 Builds**: Dynamically provision an ephemeral Google Cloud Axion C4A (`c4a-standard-4`) SPOT runner in `europe-north1-a` (ARM Neoverse-V2 cores) running containerized Ubuntu 24.04 with GCC 14, compile with `-march=armv8.2-a+lse+crc`, and automatically terminate the VM upon completion.
+   - **ARM64 Builds**: Dynamically provision an ephemeral Google Cloud Axion C4A (`c4a-standard-16`, 16 vCPUs, 64 GB RAM) SPOT runner in `europe-north1-a` (ARM Neoverse-V2 cores) running containerized Ubuntu 24.04 with GCC 14, compile with `-march=armv8.2-a+lse+crc`, and automatically terminate the VM upon completion.
 3. **Artifact Publishing**: Packages stripped binaries, default configuration templates, and systemd units into `.tar.gz` archives, calculates SHA256 checksums, and attaches them to GitHub Releases.
 
 ---
