@@ -255,7 +255,12 @@ jobs:
   publish:
     name: 📦 Publish GitHub Release
     needs: [check-upstream, build-x86, build-arm]
-    if: always() && needs.check-upstream.outputs.should_build == 'true' && (needs.build-x86.result == 'success' || needs.build-arm.result == 'success')
+    if: |
+      always() &&
+      needs.check-upstream.outputs.should_build == 'true' &&
+      (inputs.skip_x86 || needs.build-x86.result == 'success') &&
+      (inputs.skip_arm || needs.build-arm.result == 'success') &&
+      !(inputs.skip_x86 && inputs.skip_arm)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
