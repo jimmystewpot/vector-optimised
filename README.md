@@ -13,11 +13,20 @@ High-performance, automated, hardware-optimized distributions of [Vector](https:
 Upstream Vector distributes generic pre-compiled binaries targeting baseline CPU specifications (`x86-64` baseline and `aarch64` ARMv8.0-A) to guarantee compatibility with older processors. However, modern cloud instances (AWS Graviton, GCP Tau T2A, AMD EPYC, Intel Xeon) feature advanced architectural extensions that deliver substantial latency and throughput gains:
 
 ### 1. ARM64 Cloud Servers (`aarch64-unknown-linux-gnu-lse`)
+* **Compiler Flags & Architecture Tuning**:
+  * **C/C++ (`CFLAGS` / `CXXFLAGS`)**: `-O3 -march=armv8.2-a+lse+crc`
+  * **Rust (`RUSTFLAGS`)**: `-C target-feature=+lse,+crc -C panic=abort -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,-O3`
+* **Modern Build Toolchain**: Built using GCC 14+ on Ubuntu 24.04 LTS alongside the latest stable Rust compiler managed via `rustup`.
 * **Inlined ARM Large System Extensions (`+lse`)**: Replaces runtime trampoline helper calls (`__aarch64_cas8_acq_rel`) and load-linked / store-conditional (`ldxr`/`stxr`) retry loops with inlined single-instruction atomic operations (`ldadd`, `cas`, `swp`).
 * **Lower Processing Latency**: Eliminates subroutine call frame setup and register spilling for every atomic operation across Tokio worker threads, channel buffers, and metric counters.
+* **Hardware CRC32 Acceleration (`+crc`)**: Unlocks dedicated ARM CRC32 instructions for accelerated checksumming in network protocols, framing, and data integrity verification.
 * **Reduced Multi-Thread Contention in Sinks**: Accelerates high-frequency reference counting and queue synchronization inside multi-threaded sinks (e.g. `rdkafka` / `librdkafka`), lowering tail latency and preventing queue-full backpressure.
-* **Neoverse-N1 Microarchitecture Tuning**: Optimizes instruction scheduling, loop alignments, and branch prediction specifically for modern ARM server cores.
-* **Target Platforms**: AWS Graviton 2/3/4, Google Cloud Tau T2A, Ampere Altra, Azure Cobalt 100.
+* **Binary Size & Runtime Optimization**:
+  * `-C panic=abort`: Removes stack unwinding landing pads and unwinding tables, significantly shrinking binary footprint and improving CPU instruction cache efficiency.
+  * `-C link-arg=-Wl,--gc-sections`: Eliminates dead code and unused symbols at link time.
+  * `-C link-arg=-Wl,-O3`: Applies aggressive whole-program linker optimizations to optimize final layout and execution paths.
+* **Build Architecture (Google Cloud Axion C4A)**: Compiled natively on ephemeral Google Cloud Axion C4A SPOT runners powered by ARM Neoverse-V2 cores.
+* **Target Platforms**: Google Cloud Axion (C4A), AWS Graviton 2/3/4, Google Cloud Tau T2A, Ampere Altra / AmpereOne, Azure Cobalt 100.
 
 ### 2. Modern x86_64 Cloud Servers (`x86_64-unknown-linux-gnu-v3`)
 * **x86-64 Microarchitecture Level 3 (`x86-64-v3`)**: Unlocks AVX, AVX2, FMA, BMI1, BMI2, F16C, and LZCNT instructions.
@@ -95,7 +104,7 @@ This repository is an automated build and release orchestrator:
 1. **Upstream Release Detection**: A scheduled GitHub Actions workflow runs daily at 02:00 UTC to inspect [vectordotdev/vector](https://github.com/vectordotdev/vector) for new official releases.
 2. **Dedicated Runner Compilation**:
    - **x86_64 Builds**: Run locally on a Kubernetes ARC runner scale set (`runs-on: arc-runner-set`) targeting `x86-64-v3`.
-   - **ARM64 Builds**: Dynamically provision an ephemeral Google Cloud `t2a-standard-16` instance (16 Neoverse-N1 cores), compile with native LSE and CFLAGS, and automatically terminate the VM upon completion.
+   - **ARM64 Builds**: Dynamically provision an ephemeral Google Cloud Axion C4A (`c4a-standard-4`) SPOT runner in `europe-north1-a` (ARM Neoverse-V2 cores) running containerized Ubuntu 24.04 with GCC 14, compile with `-march=armv8.2-a+lse+crc`, and automatically terminate the VM upon completion.
 3. **Artifact Publishing**: Packages stripped binaries, default configuration templates, and systemd units into `.tar.gz` archives, calculates SHA256 checksums, and attaches them to GitHub Releases.
 
 ---
