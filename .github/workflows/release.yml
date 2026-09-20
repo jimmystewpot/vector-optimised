@@ -163,7 +163,7 @@ jobs:
             --image-family="ubuntu-minimal-2404-lts-arm64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-size=50GB \
-            --metadata="github-repo=${{ github.repository }},runner-token=${REG_TOKEN},runner-labels=self-hosted,linux,arm64,${RUNNER_LABEL}" \
+            --metadata="^:::^github-repo=${{ github.repository }}:::runner-token=${REG_TOKEN}:::runner-labels=self-hosted,linux,arm64,${RUNNER_LABEL}" \
             --metadata-from-file=startup-script=scripts/gce-arm-bootstrap.sh
 
   # ---------------------------------------------------------------------------
