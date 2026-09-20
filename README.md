@@ -29,10 +29,18 @@ Upstream Vector distributes generic pre-compiled binaries targeting baseline CPU
 * **Target Platforms**: Google Cloud Axion (C4A), AWS Graviton 2/3/4, Google Cloud Tau T2A, Ampere Altra / AmpereOne, Azure Cobalt 100.
 
 ### 2. Modern x86_64 Cloud Servers (`x86_64-unknown-linux-gnu-v3`)
+* **Compiler Flags & Architecture Tuning**:
+  * **C/C++ (`CFLAGS` / `CXXFLAGS`)**: `-O3 -march=x86-64-v3`
+  * **Rust (`RUSTFLAGS`)**: `-C target-cpu=x86-64-v3 -C panic=abort -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,-O3`
+* **Modern Build Toolchain**: Built using GCC 14+ alongside the latest stable Rust compiler managed via `rustup` on Kubernetes Actions Runner Controller (ARC) runners.
 * **x86-64 Microarchitecture Level 3 (`x86-64-v3`)**: Unlocks AVX, AVX2, FMA, BMI1, BMI2, F16C, and LZCNT instructions.
 * **Accelerated Event Throughput**: Leverages 256-bit SIMD registers for high-speed string scanning, UTF-8 validation (`simdutf8`), base64 encoding (`base64-simd`), and state machine lookups.
 * **Faster Compression**: Unlocks AVX2 vector fast-paths in compression codecs (`zstd`, `lz4`, `gzip`), reducing CPU saturation when sending compressed batches to storage and logging sinks.
 * **Low-Latency Bit Manipulation**: Utilizes single-cycle bit-manipulation instructions (`BMI2`, `LZCNT`) for rapid bitmask evaluation, hashing, and framing decoders.
+* **Binary Size & Runtime Optimization**:
+  * `-C panic=abort`: Removes stack unwinding landing pads and unwinding tables, significantly shrinking binary footprint and improving CPU instruction cache efficiency.
+  * `-C link-arg=-Wl,--gc-sections`: Eliminates dead code and unused symbols at link time.
+  * `-C link-arg=-Wl,-O3`: Applies aggressive whole-program linker optimizations to optimize final layout and execution paths.
 * **Target Platforms**: Modern Intel Xeon (Haswell+) and AMD EPYC (Zen 1+) cloud VMs.
 
 ---
