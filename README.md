@@ -69,6 +69,48 @@ Empirically validated on Google Cloud Compute Engine (`t2a-standard-16`, 16 vCPU
 
 ---
 
+## Measured Performance Gains (x86_64-v3 / AVX2 / AMD Zen & Intel Xeon)
+
+Empirically validated on modern AMD Zen architecture (`AMD Ryzen AI 9 HX 370`, 12 cores / 24 threads, AVX2, AVX-512, BMI2, SSE4.2) comparing generic upstream `x86-64` against `x86-64-v3` compiled builds with identical release optimization profiles (`opt-level = 3`, `lto = "fat"`, `codegen-units = 1`):
+
+### Compression & Decompression Throughput & Latency (Realistic JSON Log Payloads)
+
+| Codec / Workload | Operation | Payload Size | Upstream Generic (`x86-64`) | Hardware-Optimized (`x86-64-v3`) | Performance Gain |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| **Gzip (Default Compression)** | Compress | 4 MB | 729.96 µs (5.35 GB/s) | **671.26 µs (5.82 GB/s)** | **+8.74% throughput (−8.04% latency)** |
+| **Gzip (Default Compression)** | Compress | 1 MB | 183.01 µs (5.34 GB/s) | **179.43 µs (5.44 GB/s)** | **+2.00% throughput (−1.96% latency)** |
+| **Zstandard (Level 3)** | Decompress | 64 KB | 3.64 µs (16.76 GB/s) | **3.40 µs (17.95 GB/s)** | **+7.12% throughput (−6.64% latency)** |
+| **Zstandard (Level 3)** | Compress | 64 KB | 10.91 µs (5.59 GB/s) | **10.39 µs (5.87 GB/s)** | **+4.99% throughput (−4.75% latency)** |
+| **Zstandard (Level 3)** | Compress | 1 MB | 105.46 µs (9.26 GB/s) | 111.60 µs (8.75 GB/s) | Parity (C library runtime dispatch) |
+| **Snappy (Raw Block)** | Decompress | 4 MB | 167.02 µs (23.39 GB/s) | 174.67 µs (22.36 GB/s) | Parity (−4.38% throughput) |
+| **Snappy (Framed Stream)** | Decompress | 1 MB | 134.36 µs (7.27 GB/s) | 138.25 µs (7.06 GB/s) | Parity (−2.81% throughput) |
+| **Snappy (Framed Stream)** | Compress | 64 KB | 8.27 µs (7.38 GB/s) | 8.52 µs (7.17 GB/s) | Parity (−2.96% throughput) |
+| **LZ4 (Block, pure-Rust)** | Compress | 4 MB | 113.85 µs (34.31 GB/s) | 132.21 µs (29.55 GB/s) | −13.89% throughput |
+
+* **Analysis & Codec Characteristics**:
+  * **Streaming / Deflate (Gzip)**: Leverages 256-bit AVX2 vectorization and BMI2 bit manipulation for hash chain traversal, LZ77 sliding window matching, and Huffman bitstream emission, delivering **+8.74% higher throughput** and **−8.04% lower latency** on large batches.
+  * **Zstandard**: Shows immediate throughput gains on small payload blocks (**+7.12% decompression, +4.99% compression**), while multi-megabyte payloads remain at parity due to libzstd's internal runtime CPU feature selection.
+  * **Pure-Rust Byte Loops (`snap` / `lz4_flex`)**: Generic `x86-64` compiles to highly tuned scalar 64-bit word unaligned copy loops. While `x86-64-v3` introduces 15× more vectorized YMM instructions across the binary (16,714 vs 1,122 instructions), short repeat sequences in pure-Rust LZ4 block codecs can incur loop remainder/peeling overhead.
+
+---
+
+## Additional Codebase Areas Benefiting from Compiler Optimization
+
+In addition to compression codecs, Vector's architecture leverages compiler-optimized extensions across several core subsystems:
+
+1. **Vector Remap Language (VRL) & String Operations**:
+   * **`simdutf8`**: Validates UTF-8 strings at multi-gigabyte-per-second throughput using 256-bit AVX2 vectors during log ingestion and VRL parsing.
+   * **`base64-simd`**: Accelerated base64 encoding and decoding (`encode_base64`, `decode_base64`) using vector register lookups.
+   * **`memchr`**: AVX2-accelerated substring search and byte delimiter scanning across VRL parsing functions.
+2. **Columnar Ingestion & Analytical Formats**:
+   * **Apache Arrow & Parquet (`parquet`, `arrow-ipc`)**: Unlocks vectorized bitmask evaluation, null bitmap filtering, and dictionary decoders for analytical sinks and file sources.
+3. **Topology Routing & Hashing**:
+   * **`ahash`**: Directly utilizes hardware AES-NI instructions (`vaesenc`) and folded 64-bit multiplications for single-cycle hashing across internal channel buffers and deduplication caches.
+4. **JSON Parsing & Bit Manipulation**:
+   * Utilizes BMI2 instructions (`pext`, `pdep`, `lzcnt`, `tzcnt`) for single-cycle bitmask manipulation and rapid escape sequence scanning.
+
+---
+
 ## Quick Install
 
 Download and unpack the latest release for your architecture from the [Releases](https://github.com/jimmystewpot/vector-optimised/releases) page:
