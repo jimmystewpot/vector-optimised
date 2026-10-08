@@ -159,14 +159,47 @@ jobs:
             --machine-type="c4a-standard-16" \
             --provisioning-model=SPOT \
             --instance-termination-action=DELETE \
-            --max-run-duration=30m \
+            --max-run-duration=60m \
             --image-family="ubuntu-minimal-2404-lts-arm64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-size=50GB \
             --service-account="gha-arm-runner@oranged-experimentation.iam.gserviceaccount.com" \
             --scopes="cloud-platform" \
-            --metadata="^:::^github-repo=${{ github.repository }}:::runner-token=${REG_TOKEN}:::runner-labels=self-hosted,linux,arm64,${RUNNER_LABEL}" \
+            --metadata="^:::^github-repo=${{ github.repository }}:::runner-token=${REG_TOKEN}:::runner-labels=self-hosted,linux,arm64,${RUNNER_LABEL}:::serial-port-logging-enable=true" \
             --metadata-from-file=startup-script=scripts/gce-arm-bootstrap.sh
+
+      - name: Wait for ARM Runner Registration
+        run: |
+          INSTANCE_NAME="${{ steps.create-vm.outputs.instance-name }}"
+          RUNNER_LABEL="${{ steps.create-vm.outputs.runner-label }}"
+          echo "Waiting for self-hosted runner with label '${RUNNER_LABEL}' to register and come online..."
+
+          ONLINE=false
+          for i in {1..36}; do
+            STATUS=$(curl -s \
+              -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners" | \
+              jq -r --arg label "${RUNNER_LABEL}" '.runners[] | select(.labels[].name == $label) | .status' 2>/dev/null || true)
+
+            if [[ "${STATUS}" == "online" || "${STATUS}" == "idle" ]]; then
+              echo "Runner with label '${RUNNER_LABEL}' is online! (detected after $((i * 5))s)"
+              ONLINE=true
+              break
+            fi
+
+            echo "Runner not ready yet (attempt ${i}/36, status: '${STATUS}'). Waiting 5s..."
+            sleep 5
+          done
+
+          if [[ "${ONLINE}" != "true" ]]; then
+            echo "ERROR: Runner failed to register within 180 seconds!" >&2
+            echo "--- Serial Port Output for ${INSTANCE_NAME} ---" >&2
+            gcloud compute instances get-serial-port-output "${INSTANCE_NAME}" \
+              --project="${{ env.GCP_PROJECT }}" \
+              --zone="${{ env.GCP_ZONE }}" 2>&1 || true
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Step 4: ARM64 Build (Runs in Container on Ephemeral C4A Runner)
@@ -231,7 +264,7 @@ jobs:
   teardown-arm-runner:
     name: 🧹 Teardown GCE Axion C4A Runner
     needs: [launch-arm-runner, build-arm]
-    if: always() && needs.launch-arm-runner.result == 'success'
+    if: always() && needs.launch-arm-runner.outputs.instance-name != ''
     runs-on: ubuntu-latest
     steps:
       - name: Authenticate to Google Cloud via WIF
