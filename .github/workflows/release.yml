@@ -43,7 +43,7 @@ jobs:
       target_tag: ${{ steps.check.outputs.target_tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check for unbuilt release
         id: check
@@ -61,7 +61,7 @@ jobs:
     runs-on: arc-runner-set
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -74,7 +74,7 @@ jobs:
           gcc --version
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
           cache: true
@@ -100,7 +100,7 @@ jobs:
           ./scripts/package-tarball.sh "${{ needs.check-upstream.outputs.target_tag }}" "x86_64-unknown-linux-gnu-v3"
 
       - name: Upload x86 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: vector-${{ needs.check-upstream.outputs.target_tag }}-x86_64
           path: artifacts/*.tar.gz
@@ -118,17 +118,17 @@ jobs:
       instance-name: ${{ steps.create-vm.outputs.instance-name }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Authenticate to Google Cloud via WIF
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
           service_account: "gha-arm-runner@oranged-experimentation.iam.gserviceaccount.com"
 
       - name: Generate GitHub App Runner Token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.ARM_RUNNER_APP_ID }}
           private-key: ${{ secrets.ARM_RUNNER_APP_PRIVATE_KEY }}
@@ -211,7 +211,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify Architecture & Engine
         run: |
@@ -253,7 +253,7 @@ jobs:
             '
 
       - name: Upload ARM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: vector-${{ needs.check-upstream.outputs.target_tag }}-arm64
           path: artifacts/*.tar.gz
@@ -268,7 +268,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Authenticate to Google Cloud via WIF
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
           service_account: "gha-arm-runner@oranged-experimentation.iam.gserviceaccount.com"
@@ -297,10 +297,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist/
           merge-multiple: true
