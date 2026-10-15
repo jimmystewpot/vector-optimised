@@ -100,7 +100,7 @@ jobs:
           ./scripts/package-tarball.sh "${{ needs.check-upstream.outputs.target_tag }}" "x86_64-unknown-linux-gnu-v3"
 
       - name: Upload x86 artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vector-${{ needs.check-upstream.outputs.target_tag }}-x86_64
           path: artifacts/*.tar.gz
@@ -253,7 +253,7 @@ jobs:
             '
 
       - name: Upload ARM artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vector-${{ needs.check-upstream.outputs.target_tag }}-arm64
           path: artifacts/*.tar.gz
@@ -300,7 +300,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download all package artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true
