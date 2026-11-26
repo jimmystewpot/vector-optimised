@@ -58,7 +58,7 @@ jobs:
     name: 🔨 Build x86_64 (x86-64-v3)
     needs: check-upstream
     if: needs.check-upstream.outputs.should_build == 'true' && !inputs.skip_x86
-    runs-on: arc-runner-set
+    runs-on: arc-runner-vector
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
